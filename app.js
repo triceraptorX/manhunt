@@ -1010,7 +1010,8 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+// pas de service worker dans l'APK : les fichiers sont déjà dans l'application
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.Capacitor) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 

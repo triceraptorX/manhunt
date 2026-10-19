@@ -1,0 +1,56 @@
+name: APK Android
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Préparer l'appli web
+        run: |
+          npm ci
+          npm run build:www
+          npx cap sync android
+
+      - name: Compiler l'APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../chat-souris.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-souris-apk
+          path: chat-souris.apk
+
+      - name: Publier l'APK (lien de téléchargement direct)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Chat & Souris — APK Android
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          body: |
+            Télécharge **chat-souris.apk** ci-dessous depuis ton téléphone Android et installe-le.
+            Compilé depuis le commit ${{ github.sha }} (branche ${{ github.ref_name }}).
+          files: chat-souris.apk

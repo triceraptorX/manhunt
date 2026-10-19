@@ -1,0 +1,8 @@
+{
+  "appId": "com.chatsouris.app",
+  "appName": "Chat et Souris",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#14161c"
+  }
+}

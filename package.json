@@ -1,0 +1,16 @@
+{
+  "name": "chat-souris",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chasse à l'homme à deux téléphones",
+  "scripts": {
+    "build:www": "node scripts/build-www.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}
