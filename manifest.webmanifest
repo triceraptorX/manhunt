@@ -1,0 +1,15 @@
+{
+  "name": "Chat & Souris",
+  "short_name": "Chat & Souris",
+  "description": "Chasse à l'homme à deux téléphones",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14161c",
+  "theme_color": "#14161c",
+  "lang": "fr",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

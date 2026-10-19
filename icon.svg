@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#14161c"/>
+  <circle cx="256" cy="256" r="170" fill="none" stroke="#ffb020" stroke-width="22" stroke-dasharray="34 22"/>
+  <text x="230" y="300" font-size="190" text-anchor="middle">🐱</text>
+  <text x="340" y="370" font-size="110" text-anchor="middle">🐭</text>
+</svg>

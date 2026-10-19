@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#14161c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Chat &amp; Souris</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Accueil -->
+  <section id="screen-home" class="screen active">
+    <div class="home-hero">
+      <div class="logo">🐱<span>🐭</span></div>
+      <h1>Chat &amp; Souris</h1>
+      <p class="muted">Chasse à l'homme à deux téléphones</p>
+    </div>
+    <div class="stack">
+      <button id="btn-new" class="btn btn-main">Lancer une partie</button>
+      <button id="btn-join" class="btn btn-secondary">Rejoindre une partie</button>
+      <button id="btn-resume" class="btn btn-ghost hidden">Reprendre la partie en cours</button>
+    </div>
+  </section>
+
+  <!-- Zone de jeu -->
+  <section id="screen-zone" class="screen screen-map">
+    <header class="bar">
+      <button class="btn-icon" data-back="home">←</button>
+      <h2>Zone de jeu</h2>
+    </header>
+    <div id="zone-map" class="map"></div>
+    <div class="panel">
+      <div class="seg" id="zone-mode">
+        <button data-mode="circle" class="active">Cercle</button>
+        <button data-mode="polygon">Polygone</button>
+      </div>
+      <div id="zone-circle-tools">
+        <p class="hint">Touche la carte pour placer le centre.</p>
+        <label class="row">Rayon <output id="radius-out">500 m</output></label>
+        <input type="range" id="radius" min="50" max="3000" step="25" value="500">
+      </div>
+      <div id="zone-polygon-tools" class="hidden">
+        <p class="hint">Touche la carte pour ajouter les coins de la zone (3 minimum).</p>
+        <div class="row gap">
+          <button id="poly-undo" class="btn btn-small">Annuler le point</button>
+          <button id="poly-clear" class="btn btn-small">Tout effacer</button>
+        </div>
+      </div>
+      <div class="row gap">
+        <button id="zone-locate" class="btn btn-small">📍 Ma position</button>
+        <button id="zone-next" class="btn btn-main grow" disabled>Suivant</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Paramètres -->
+  <section id="screen-settings" class="screen">
+    <header class="bar">
+      <button class="btn-icon" data-back="zone">←</button>
+      <h2>Paramètres</h2>
+    </header>
+    <form id="settings-form" class="form">
+      <label>Ton pseudo
+        <input name="name" maxlength="16" required autocomplete="off">
+      </label>
+      <label>Durée totale de la partie (minutes)
+        <input name="total" type="number" min="2" max="600" value="60" required>
+      </label>
+      <label>Avance de la souris (minutes)
+        <input name="head" type="number" min="0.5" max="120" step="0.5" value="10" required>
+        <small>Pendant ce temps le chat voit la souris en direct mais elle ne peut pas être touchée.</small>
+      </label>
+      <label>Position de la souris pendant la chasse
+        <select name="reveal">
+          <option value="interval" selected>Révélée régulièrement</option>
+          <option value="live">En direct</option>
+          <option value="hidden">Cachée</option>
+        </select>
+      </label>
+      <label id="reveal-every-wrap">Révélation toutes les (minutes)
+        <input name="revealEvery" type="number" min="0.5" max="60" step="0.5" value="2">
+      </label>
+      <details>
+        <summary>Avancé</summary>
+        <label>Serveur de connexion (MQTT WebSocket)
+          <input name="broker" autocomplete="off" spellcheck="false">
+          <small>Les deux téléphones doivent utiliser le même serveur.</small>
+        </label>
+      </details>
+      <button class="btn btn-main" type="submit">Créer la partie</button>
+    </form>
+  </section>
+
+  <!-- Rejoindre -->
+  <section id="screen-join" class="screen">
+    <header class="bar">
+      <button class="btn-icon" data-back="home">←</button>
+      <h2>Rejoindre</h2>
+    </header>
+    <form id="join-form" class="form">
+      <label>Ton pseudo
+        <input name="name" maxlength="16" required autocomplete="off">
+      </label>
+      <label>Code de la partie
+        <input name="code" class="code-input" maxlength="6" required autocomplete="off" autocapitalize="characters" spellcheck="false">
+      </label>
+      <details>
+        <summary>Avancé</summary>
+        <label>Serveur de connexion (MQTT WebSocket)
+          <input name="broker" autocomplete="off" spellcheck="false">
+        </label>
+      </details>
+      <button class="btn btn-main" type="submit">Se connecter</button>
+    </form>
+  </section>
+
+  <!-- Salon d'attente -->
+  <section id="screen-lobby" class="screen">
+    <header class="bar">
+      <button class="btn-icon" id="lobby-quit">✕</button>
+      <h2>Salon</h2>
+    </header>
+    <div class="stack center">
+      <p class="muted">Code de la partie</p>
+      <div id="lobby-code" class="big-code">——————</div>
+      <button id="lobby-share" class="btn btn-small hidden">Partager le code</button>
+      <div id="lobby-status" class="status">Connexion au serveur…</div>
+      <ul id="lobby-players" class="players"></ul>
+      <div id="lobby-summary" class="summary"></div>
+      <button id="lobby-draw" class="btn btn-main hidden" disabled>Tirage au sort 🎲</button>
+      <p id="lobby-wait" class="muted hidden">L'hôte va lancer le tirage au sort…</p>
+    </div>
+  </section>
+
+  <!-- Tirage -->
+  <section id="screen-draw" class="screen">
+    <div class="draw">
+      <p class="muted">Tirage au sort…</p>
+      <div id="draw-wheel" class="draw-wheel">?</div>
+      <div id="draw-result" class="draw-result"></div>
+    </div>
+  </section>
+
+  <!-- Jeu -->
+  <section id="screen-game" class="screen screen-map">
+    <div id="game-top" class="game-top">
+      <div class="role" id="game-role"></div>
+      <div class="clocks">
+        <div><small>Fin de partie</small><b id="game-left">--:--</b></div>
+        <div><small>Moi en souris</small><b id="score-me">00:00</b></div>
+        <div><small id="score-other-label">Adversaire</small><b id="score-other">00:00</b></div>
+      </div>
+      <div id="net-dot" class="net-dot" title="Connexion"></div>
+      <button id="game-quit" class="game-quit" aria-label="Abandonner">✕</button>
+    </div>
+    <div id="zone-alert" class="alert hidden"></div>
+
+    <!-- Vue chat -->
+    <div id="hunter-view" class="hunter-view hidden">
+      <div id="game-map" class="map"></div>
+      <div class="panel hunter-panel">
+        <div id="hunter-phase" class="phase"></div>
+        <div id="hunter-info" class="muted"></div>
+      </div>
+    </div>
+
+    <!-- Vue souris -->
+    <div id="mouse-view" class="mouse-view hidden">
+      <div id="mouse-phase-label" class="phase-label"></div>
+      <div id="mouse-timer" class="mouse-timer">--:--</div>
+      <div id="mouse-sub" class="muted center"></div>
+      <button id="btn-tagged" class="btn btn-tag hidden">Je suis touché !</button>
+      <button id="btn-mouse-map" class="btn btn-ghost btn-small">Voir la zone</button>
+      <div id="mouse-map-wrap" class="mouse-map hidden"><div id="mouse-map" class="map"></div></div>
+    </div>
+  </section>
+
+  <!-- Fin -->
+  <section id="screen-end" class="screen">
+    <div class="stack center">
+      <div id="end-emoji" class="end-emoji">🏆</div>
+      <h1 id="end-title"></h1>
+      <div id="end-scores" class="end-scores"></div>
+      <ol id="end-rounds" class="rounds"></ol>
+      <button id="end-home" class="btn btn-main">Retour à l'accueil</button>
+    </div>
+  </section>
+
+  <div id="toast" class="toast"></div>
+  <dialog id="confirm">
+    <form method="dialog">
+      <p id="confirm-text"></p>
+      <div class="row gap">
+        <button value="no" class="btn btn-secondary grow">Annuler</button>
+        <button value="yes" class="btn btn-main grow">Confirmer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/mqtt.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
