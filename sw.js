@@ -1,8 +1,8 @@
 // Met en cache l'application pour qu'elle se lance même avec un réseau faible.
 // Les tuiles de carte et le serveur de connexion ne sont pas concernés.
-const CACHE = 'chat-souris-v1';
+const CACHE = 'chat-souris-v2';
 const FILES = [
-  './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg',
+  './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
   'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css', 'vendor/mqtt.min.js',
 ];
 
