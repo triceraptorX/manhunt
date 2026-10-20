@@ -21,6 +21,11 @@ const POS_SEND_MS = 2500;
 const DRAW_LEAD_MS = 1200;   // délai entre le clic "tirage" et le début de l'animation
 const DRAW_SPIN_MS = 4000;   // durée de l'animation
 const DRAW_SHOW_MS = 3500;   // affichage du résultat avant le début de la partie
+const TIME_POINTS_PER_GAME = 1000; // points gagnés en restant souris pendant toute la partie
+const SHRINK_STEP_MS = 20000;      // mise à jour de la zone qui se rétrécit
+const PHOTO_AUTO_ACCEPT_MS = 90000; // photo validée d'office si le chat ne répond pas
+const PHOTO_MAX_PX = 640;
+const PHOTO_RESEND_MS = 10000;
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -129,6 +134,7 @@ function alertUser(kind) {
   if (kind === 'phase') { vibrate([300, 100, 300]); beep(990, 200, 2); }
   if (kind === 'role') { vibrate([500, 150, 500, 150, 500]); beep(660, 250, 3); }
   if (kind === 'reveal') { vibrate(120); beep(1320, 90); }
+  if (kind === 'photo') { vibrate([150, 80, 150, 80, 400]); beep(1100, 120, 3); }
   if (kind === 'zone') { vibrate([200, 100, 200, 100, 200]); beep(330, 300); }
 }
 
@@ -253,13 +259,18 @@ class Link {
 /*
  * S = {
  *   role: 'host' | 'guest', code, broker, myName, otherName, otherId,
- *   config: { zone, totalMs, headMs, reveal: 'live'|'interval'|'hidden', revealEveryMs },
+ *   config: {
+ *     zone, totalMs, headMs, reveal: 'live'|'interval'|'shrink'|'hidden', revealEveryMs,
+ *     shrinkStartM, shrinkEndM, shrinkMs, timeRate (points/min), photoPts, photoCooldownMs
+ *   },
  *   game: null | {
  *     v, mouse: 'host'|'guest', drawAt, revealAt, startAt, endAt,
- *     roundId, roundStart, mouseTime: { host, guest }, rounds: [{ mouse, start, end }]
+ *     roundId, roundStart, mouseTime: { host, guest }, rounds: [{ mouse, start, end }],
+ *     photos: [{ pid, by, roundId, at, pts, status: 'pending'|'ok'|'no' }]
  *   },
  *   offset,        // horloge de l'hôte - horloge locale (0 pour l'hôte)
  *   pendingTag,    // { roundId, at } en attente d'accusé (invité)
+ *   pendingPhoto,  // { photo, img, pos } en attente d'accusé (invité)
  * }
  */
 let S = null;
@@ -274,6 +285,15 @@ let myPos = null;
 let lastPosSent = 0;
 let lastShown = { screen: null, inHead: null, roundId: null, myOut: false, otherOut: false };
 let timers = [];
+let hint = { roundId: 0, k: -1, center: null, r: 0 }; // zone qui se rétrécit affichée au chat
+let photoImgs = {};     // hôte : pid -> { img, pos, sentAt } pour renvoyer les photos au chat invité
+let seenPhotos = new Set(); // chat : photos déjà reçues
+let verdicts = {};      // chat : pid -> true/false
+let photoQueue = [];    // chat : photos à valider
+let photoShown = null;  // chat : photo affichée dans la boîte de validation
+let photoPins = [];     // chat : positions révélées par les photos { roundId, pos }
+let photoStatusSeen = {}; // souris : dernier statut connu de ses photos
+let lastPhotoSend = 0;
 
 const hostNow = () => Date.now() + (S ? S.offset || 0 : 0);
 const me = () => S.role;
@@ -291,6 +311,15 @@ function startSession(session) {
   otherPos = null;
   reveal = { roundId: 0, k: -1, pos: null };
   lastShown = { screen: null, inHead: null, roundId: null, myOut: false, otherOut: false };
+  hint = { roundId: 0, k: -1, center: null, r: 0 };
+  photoImgs = {};
+  seenPhotos = new Set();
+  verdicts = {};
+  photoQueue = [];
+  photoShown = null;
+  photoPins = [];
+  photoStatusSeen = {};
+  if (S.game) for (const p of S.game.photos || []) photoStatusSeen[p.pid] = p.status;
   link = new Link({
     broker: S.broker,
     code: S.code,
@@ -328,6 +357,7 @@ function endSession(notify = true) {
   $('#mouse-map-wrap').classList.add('hidden');
   $('#btn-mouse-map').textContent = 'Voir la zone';
   $('#draw-wheel').classList.remove('final');
+  if ($('#photo-dialog').open) { photoShown = null; $('#photo-dialog').close(); }
   refreshHome();
   show('home');
 }
@@ -345,6 +375,7 @@ function heartbeat() {
   }
   link.send(msg);
   maybeSendPos(true);
+  if (S.role === 'host') hostResendPhotos();
 }
 
 function guestHousekeeping() {
@@ -355,6 +386,12 @@ function guestHousekeeping() {
   if (S.config && (!synced || Math.random() < 0.05)) sendPing();
   // accusé de "touché" pas encore reçu
   if (S.pendingTag) link.send({ t: 'tag', id: deviceId, ...S.pendingTag });
+  // photo pas encore reçue par l'hôte
+  if (S.pendingPhoto && Date.now() - lastPhotoSend > PHOTO_RESEND_MS) sendPendingPhoto();
+  // verdict sur une photo pas encore pris en compte par l'hôte
+  for (const p of (S.game && S.game.photos) || []) {
+    if (p.status === 'pending' && p.pid in verdicts) link.send({ t: 'verdict', id: deviceId, pid: p.pid, ok: verdicts[p.pid] });
+  }
 }
 
 function sendPing() {
@@ -388,6 +425,11 @@ function handleMessage(msg) {
     else if (msg.t === 'tag') {
       hostApplyTag(msg.roundId, msg.at);
       link.send({ t: 'game', to: S.otherId, game: S.game });
+    } else if (msg.t === 'photo') {
+      hostAddPhoto(msg.photo, msg.img, msg.pos);
+      link.send({ t: 'game', to: S.otherId, game: S.game });
+    } else if (msg.t === 'verdict') {
+      hostResolvePhoto(msg.pid, msg.ok);
     }
     return;
   }
@@ -422,6 +464,8 @@ function handleMessage(msg) {
     renderLobby();
   } else if (msg.t === 'pos') {
     receivePos(msg.p);
+  } else if (msg.t === 'photo') {
+    hunterReceivePhoto(msg.photo, msg.img, msg.pos);
   } else if (msg.t === 'bye') {
     toast("L'hôte a quitté la partie", 4000);
     endSession(false);
@@ -434,6 +478,8 @@ function applyGame(game) {
   const prevRound = S.game && S.game.roundId;
   S.game = game;
   if (S.pendingTag && game.roundId > S.pendingTag.roundId) S.pendingTag = null;
+  if (S.pendingPhoto && (game.roundId !== S.pendingPhoto.photo.roundId ||
+    (game.photos || []).some((p) => p.pid === S.pendingPhoto.photo.pid))) S.pendingPhoto = null;
   if (prevRound && prevRound !== game.roundId) otherPos = null;
   save();
 }
@@ -500,6 +546,7 @@ function hostStartDraw() {
     roundStart: startAt,
     mouseTime: { host: 0, guest: 0 },
     rounds: [],
+    photos: [],
   };
   save();
   link.send({ t: 'game', to: S.otherId, game: S.game });
@@ -542,6 +589,190 @@ function currentScores(now) {
   const s = { ...g.mouseTime };
   if (t > g.roundStart) s[g.mouse] += t - g.roundStart;
   return s;
+}
+
+function timeRate() {
+  return S.config.timeRate || TIME_POINTS_PER_GAME / (S.config.totalMs / 60e3);
+}
+
+// points = temps passé en souris x taux + photos validées
+// (en fin de partie, une photo encore en attente de validation compte)
+function currentPoints(now) {
+  const g = S.game;
+  const ended = now >= g.endAt;
+  const times = currentScores(now);
+  const out = {};
+  for (const side of ['host', 'guest']) {
+    const photos = (g.photos || []).filter((p) => p.by === side && (p.status === 'ok' || (ended && p.status === 'pending')));
+    const timePts = Math.floor((times[side] / 60e3) * timeRate());
+    const photoPts = photos.reduce((a, p) => a + p.pts, 0);
+    out[side] = { time: times[side], timePts, photos: photos.length, photoPts, total: timePts + photoPts };
+  }
+  return out;
+}
+
+/* ---------- Photos du chat ---------- */
+
+function photoState(now) {
+  const g = S.game;
+  const c = S.config;
+  if (!c.photoPts || g.mouse !== me()) return { show: false };
+  if (now < g.roundStart + c.headMs || now >= g.endAt) return { show: false };
+  const mine = (g.photos || []).filter((p) => p.by === me() && p.roundId === g.roundId);
+  if ((S.pendingPhoto && S.pendingPhoto.photo.roundId === g.roundId) || mine.some((p) => p.status === 'pending')) {
+    return { show: true, ok: false, msg: 'Photo envoyée, en attente de validation du chat…' };
+  }
+  const next = Math.max(-Infinity, ...mine.map((p) => p.at)) + c.photoCooldownMs;
+  if (now < next) return { show: true, ok: false, msg: `Prochaine photo possible dans ${fmtCountdown(next - now)}` };
+  return { show: true, ok: true, msg: '' };
+}
+
+function compressPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, PHOTO_MAX_PX / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/jpeg', 0.6));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image illisible')); };
+    img.src = url;
+  });
+}
+
+function submitPhoto(img) {
+  const g = S.game;
+  const now = hostNow();
+  if (!photoState(now).ok) return;
+  const photo = { pid: randomId(), by: me(), roundId: g.roundId, at: now, pts: S.config.photoPts, status: 'pending' };
+  const pos = myPos ? { ...myPos, at: now } : null;
+  if (S.role === 'host') {
+    hostAddPhoto(photo, img, pos);
+    link.send({ t: 'game', to: S.otherId, game: S.game });
+  } else {
+    S.pendingPhoto = { photo, img, pos };
+    save();
+    sendPendingPhoto();
+  }
+  toast('📸 Photo envoyée au chat');
+}
+
+function sendPendingPhoto() {
+  lastPhotoSend = Date.now();
+  link.send({ t: 'photo', id: deviceId, ...S.pendingPhoto });
+}
+
+function hostAddPhoto(photo, img, pos) {
+  const g = S.game;
+  if (!g || !photo || (g.photos || []).some((p) => p.pid === photo.pid)) return;
+  if (photo.roundId !== g.roundId || photo.by !== g.mouse) return;
+  const now = hostNow();
+  if (now >= g.endAt) return;
+  g.photos = g.photos || [];
+  g.photos.push({ ...photo, at: Math.min(photo.at, now), pts: S.config.photoPts, status: 'pending' });
+  g.v += 1;
+  save();
+  photoImgs[photo.pid] = { img, pos, sentAt: 0 };
+  if (photo.by === 'guest') hunterReceivePhoto(photo, img, pos);
+  else hostResendPhotos();
+}
+
+// l'hôte est la souris : renvoie la photo au chat tant qu'il ne l'a pas jugée
+function hostResendPhotos() {
+  const g = S.game;
+  if (!g || !S.otherId) return;
+  for (const p of g.photos || []) {
+    const data = photoImgs[p.pid];
+    if (p.by !== 'host' || p.status !== 'pending' || !data) continue;
+    if (Date.now() - data.sentAt < PHOTO_RESEND_MS) continue;
+    data.sentAt = Date.now();
+    link.send({ t: 'photo', to: S.otherId, photo: p, img: data.img, pos: data.pos });
+  }
+}
+
+function hostResolvePhoto(pid, ok) {
+  const p = ((S.game && S.game.photos) || []).find((x) => x.pid === pid);
+  if (!p || p.status !== 'pending' || hostNow() >= S.game.endAt) return;
+  p.status = ok ? 'ok' : 'no';
+  S.game.v += 1;
+  save();
+  link.send({ t: 'game', to: S.otherId, game: S.game });
+}
+
+function hunterReceivePhoto(photo, img, pos) {
+  if (!S.game || !photo) return;
+  if (seenPhotos.has(photo.pid)) {
+    if (S.role === 'guest' && photo.pid in verdicts) link.send({ t: 'verdict', id: deviceId, pid: photo.pid, ok: verdicts[photo.pid] });
+    return;
+  }
+  seenPhotos.add(photo.pid);
+  if (pos) photoPins.push({ roundId: photo.roundId, pos });
+  photoQueue.push({ photo, img });
+  alertUser('photo');
+  showNextPhoto();
+}
+
+function showNextPhoto() {
+  const dlg = $('#photo-dialog');
+  if (dlg.open || !photoQueue.length) return;
+  photoShown = photoQueue.shift();
+  $('#photo-img').src = photoShown.img;
+  dlg.returnValue = '';
+  dlg.showModal();
+}
+
+$('#photo-dialog').addEventListener('close', () => {
+  const shown = photoShown;
+  photoShown = null;
+  const dlg = $('#photo-dialog');
+  if (shown && S && (dlg.returnValue === 'yes' || dlg.returnValue === 'no')) {
+    const ok = dlg.returnValue === 'yes';
+    verdicts[shown.photo.pid] = ok;
+    if (S.role === 'host') hostResolvePhoto(shown.photo.pid, ok);
+    else link.send({ t: 'verdict', id: deviceId, pid: shown.photo.pid, ok });
+  } else if (shown && S && dlg.returnValue === '') {
+    // fermée sans choix (touche retour) : on la représente
+    const p = (S.game.photos || []).find((x) => x.pid === shown.photo.pid);
+    if (!p || p.status === 'pending') photoQueue.unshift(shown);
+  }
+  setTimeout(() => S && showNextPhoto(), 300);
+});
+
+// boîte de validation du chat : compte à rebours, fermeture si la photo a déjà été jugée
+function renderPhotoDialog(now) {
+  const dlg = $('#photo-dialog');
+  if (!dlg.open || !photoShown) return;
+  const p = (S.game.photos || []).find((x) => x.pid === photoShown.photo.pid);
+  if (p && p.status !== 'pending') {
+    photoShown = null;
+    dlg.close('done');
+    return;
+  }
+  const left = photoShown.photo.at + PHOTO_AUTO_ACCEPT_MS - now;
+  $('#photo-auto').textContent = `+${photoShown.photo.pts} pts pour la souris · validée automatiquement dans ${fmtCountdown(left)}`;
+}
+
+function hostAutoAcceptPhotos(now) {
+  for (const p of (S.game && S.game.photos) || []) {
+    if (p.status === 'pending' && now - p.at > PHOTO_AUTO_ACCEPT_MS && now < S.game.endAt) hostResolvePhoto(p.pid, true);
+  }
+}
+
+// la souris est prévenue quand le chat a jugé sa photo
+function notifyPhotoResults() {
+  for (const p of S.game.photos || []) {
+    const before = photoStatusSeen[p.pid];
+    photoStatusSeen[p.pid] = p.status;
+    // une photo jamais vue en attente (reprise de partie) ne déclenche pas de notification
+    if (p.by !== me() || before === p.status || p.status === 'pending' || before === undefined) continue;
+    if (p.status === 'ok') { toast(`📸 Photo validée : +${p.pts} pts !`, 3500); alertUser('reveal'); }
+    else toast('📸 Le chat a refusé ta photo', 3500);
+  }
 }
 
 /* ---------- Écrans ---------- */
@@ -665,25 +896,38 @@ $('#zone-locate').addEventListener('click', () => locate(zoneMap));
 $('#zone-next').addEventListener('click', () => {
   const f = $('#settings-form');
   f.name.value = prefs.name || '';
-  for (const k of ['total', 'head', 'reveal', 'revealEvery']) if (prefs[k] != null) f[k].value = prefs[k];
+  for (const k of SETTING_FIELDS) if (prefs[k] != null) f[k].value = prefs[k];
   f.broker.value = defaultBroker();
   updateRevealField();
   show('settings');
 });
 
 /* Paramètres */
+const SETTING_FIELDS = ['total', 'head', 'reveal', 'revealEvery', 'shrinkStart', 'shrinkEnd', 'shrinkDur', 'photoPts', 'photoCooldown'];
+
 function updateRevealField() {
-  $('#reveal-every-wrap').classList.toggle('hidden', $('#settings-form').reveal.value !== 'interval');
+  const f = $('#settings-form');
+  $('#reveal-every-wrap').classList.toggle('hidden', f.reveal.value !== 'interval');
+  $('#shrink-wrap').classList.toggle('hidden', f.reveal.value !== 'shrink');
+  const total = Number(f.total.value) || 60;
+  const rate = TIME_POINTS_PER_GAME / total;
+  $('#rate-hint').textContent = `En souris tu gagnes ${rate.toFixed(1).replace('.0', '')} pts/min ` +
+    `(${TIME_POINTS_PER_GAME} pts si tu restes souris toute la partie). Le gagnant est celui qui a le plus de points.`;
 }
 $('#settings-form').reveal.addEventListener('change', updateRevealField);
+$('#settings-form').total.addEventListener('input', updateRevealField);
 $('#settings-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = e.target;
   const total = Number(f.total.value);
   const head = Number(f.head.value);
   if (head >= total) { toast("L'avance doit être plus courte que la partie."); return; }
+  const shrinkStart = Number(f.shrinkStart.value) || 500;
+  const shrinkEnd = Math.min(Number(f.shrinkEnd.value) || 30, shrinkStart);
   const broker = f.broker.value.trim() || DEFAULT_BROKER;
-  savePrefs({ name: f.name.value.trim(), total, head, reveal: f.reveal.value, revealEvery: Number(f.revealEvery.value), broker });
+  const saved = { name: f.name.value.trim(), broker };
+  for (const k of SETTING_FIELDS) saved[k] = f[k].value;
+  savePrefs(saved);
   startSession({
     role: 'host',
     code: randomCode(),
@@ -697,6 +941,12 @@ $('#settings-form').addEventListener('submit', (e) => {
       headMs: head * 60e3,
       reveal: f.reveal.value,
       revealEveryMs: Math.max(0.5, Number(f.revealEvery.value) || 2) * 60e3,
+      shrinkStartM: shrinkStart,
+      shrinkEndM: shrinkEnd,
+      shrinkMs: Math.max(0.5, Number(f.shrinkDur.value) || 10) * 60e3,
+      timeRate: TIME_POINTS_PER_GAME / total,
+      photoPts: Math.max(0, Math.round(Number(f.photoPts.value) || 0)),
+      photoCooldownMs: Math.max(0.5, Number(f.photoCooldown.value) || 3) * 60e3,
     },
     game: null,
     offset: 0,
@@ -732,10 +982,18 @@ $('#join-form').code.addEventListener('input', (e) => {
 /* Salon */
 function settingsSummary(c) {
   if (!c) return '';
-  const rev = { live: 'en direct', hidden: 'cachée', interval: `révélée toutes les ${c.revealEveryMs / 60e3} min` }[c.reveal];
+  const rev = {
+    live: 'en direct',
+    hidden: 'cachée',
+    interval: `révélée toutes les ${c.revealEveryMs / 60e3} min`,
+    shrink: `zone de ${fmtDist(c.shrinkStartM)} à ${fmtDist(c.shrinkEndM)} en ${c.shrinkMs / 60e3} min`,
+  }[c.reveal];
   const zone = c.zone.type === 'circle' ? `cercle de ${fmtDist(c.zone.radius)}` : `polygone de ${c.zone.points.length} points`;
+  const rate = (c.timeRate || TIME_POINTS_PER_GAME / (c.totalMs / 60e3)).toFixed(1).replace('.0', '');
+  const photo = c.photoPts ? `photo du chat : <b>+${c.photoPts} pts</b> (toutes les ${c.photoCooldownMs / 60e3} min max)` : 'photos désactivées';
   return `Partie de <b>${c.totalMs / 60e3} min</b> · avance de <b>${c.headMs / 60e3} min</b><br>` +
-    `Position de la souris pendant la chasse : <b>${rev}</b><br>Zone : ${zone}`;
+    `Position de la souris pendant la chasse : <b>${rev}</b><br>` +
+    `Points : <b>${rate} pts/min</b> en souris · ${photo}<br>Zone : ${zone}`;
 }
 
 function renderLobby() {
@@ -818,6 +1076,8 @@ function initGameMap() {
     me: L.marker([0, 0], { icon: myIcon() }),
     mouse: L.marker([0, 0], { icon: mouseIcon(false) }),
     acc: L.circle([0, 0], { radius: 1, color: '#4ac0ff', weight: 1, fillOpacity: 0.15 }),
+    hint: L.circle([0, 0], { radius: 1, color: '#4ac0ff', weight: 3, dashArray: '8 8', fillOpacity: 0.12 }),
+    photo: L.marker([0, 0], { icon: L.divIcon({ className: 'pin-photo', html: '📸', iconSize: [26, 26] }) }),
   };
 }
 
@@ -836,11 +1096,52 @@ function setMarker(map, marker, pos) {
   if (!map.hasLayer(marker)) marker.addTo(map);
 }
 
+function shrinkRadius(sinceHeadEnd) {
+  const c = S.config;
+  const f = Math.min(1, Math.max(0, sinceHeadEnd / c.shrinkMs));
+  return c.shrinkStartM + (c.shrinkEndM - c.shrinkStartM) * f;
+}
+
+// petit générateur pseudo-aléatoire déterministe (mulberry32)
+function seededRandom(seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function offsetPoint(p, meters, angle) {
+  const dLat = (meters * Math.cos(angle)) / 111320;
+  const dLng = (meters * Math.sin(angle)) / (111320 * Math.cos((p.lat * Math.PI) / 180));
+  return { lat: p.lat + dLat, lng: p.lng + dLng };
+}
+
+// zone qui se rétrécit : un cercle qui contient la souris sans être centré sur elle,
+// recalculé toutes les SHRINK_STEP_MS avec un rayon de plus en plus petit
+function shrinkHint(now, headEnd) {
+  const g = S.game;
+  const k = Math.floor((now - headEnd) / SHRINK_STEP_MS);
+  if (hint.roundId !== g.roundId || hint.k !== k || !hint.center) {
+    const r = shrinkRadius(k * SHRINK_STEP_MS);
+    if (otherPos) {
+      const rnd = seededRandom(g.roundId * 100003 + k);
+      const center = offsetPoint(otherPos, r * 0.8 * Math.sqrt(rnd()), rnd() * 2 * Math.PI);
+      hint = { roundId: g.roundId, k, center, r };
+    } else if (hint.roundId !== g.roundId) {
+      hint = { roundId: g.roundId, k, center: null, r };
+    }
+  }
+  return { mode: 'shrink', pos: null, zone: hint, next: headEnd + (k + 1) * SHRINK_STEP_MS };
+}
+
 function visibleMouse(now) {
   const g = S.game;
   const headEnd = g.roundStart + S.config.headMs;
   if (now < headEnd || S.config.reveal === 'live') return { pos: otherPos, mode: 'live' };
   if (S.config.reveal === 'hidden') return { pos: null, mode: 'hidden' };
+  if (S.config.reveal === 'shrink') return shrinkHint(now, headEnd);
   const every = S.config.revealEveryMs;
   const k = Math.floor((now - headEnd) / every);
   if (reveal.roundId !== g.roundId || reveal.k !== k) {
@@ -857,7 +1158,9 @@ function renderGame(now) {
   const isMouse = g.mouse === me();
   const headEnd = g.roundStart + S.config.headMs;
   const inHead = now < headEnd;
-  const scores = currentScores(now);
+  const pts = currentPoints(now);
+  notifyPhotoResults();
+  renderPhotoDialog(now);
 
   // alertes de changement de rôle / de phase
   if (lastShown.roundId !== null && lastShown.roundId !== g.roundId) {
@@ -875,9 +1178,9 @@ function renderGame(now) {
   role.textContent = isMouse ? 'Tu es la SOURIS 🐭' : 'Tu es le CHAT 🐱';
   role.className = 'role ' + (isMouse ? 'mouse' : 'cat');
   $('#game-left').textContent = fmtCountdown(g.endAt - now);
-  $('#score-me').textContent = fmt(scores[me()]);
-  $('#score-other').textContent = fmt(scores[other()]);
-  $('#score-other-label').textContent = (S.otherName || 'Adversaire') + ' en souris';
+  $('#score-me').textContent = pts[me()].total + ' pts';
+  $('#score-other').textContent = pts[other()].total + ' pts';
+  $('#score-other-label').textContent = S.otherName || 'Adversaire';
   $('#net-dot').classList.toggle('ok', netOk && peerConnected());
 
   // sortie de zone
@@ -895,9 +1198,19 @@ function renderGame(now) {
   if (isMouse) {
     $('#mouse-phase-label').textContent = inHead ? 'Fuis ! Chasse dans' : 'Temps restant';
     $('#mouse-timer').textContent = fmtCountdown(inHead ? headEnd - now : g.endAt - now);
-    $('#mouse-sub').textContent = inHead
-      ? 'Le chat voit ta position en direct pendant ta fuite.'
-      : `Ton temps en souris : ${fmt(scores[me()])}`;
+    const rate = timeRate().toFixed(1).replace('.0', '');
+    let sub = inHead ? 'Le chat voit ta position en direct pendant ta fuite.' : `${pts[me()].total} pts · tu gagnes ${rate} pts/min`;
+    if (!inHead && S.config.reveal === 'shrink') {
+      const step = Math.floor((now - headEnd) / SHRINK_STEP_MS) * SHRINK_STEP_MS;
+      sub += ` · le chat voit une zone de ${fmtDist(shrinkRadius(step))}`;
+    }
+    $('#mouse-sub').textContent = sub;
+    const ph = photoState(now);
+    const pbtn = $('#btn-photo');
+    pbtn.classList.toggle('hidden', !ph.show);
+    pbtn.disabled = !ph.ok;
+    pbtn.textContent = `📸 Photo du chat (+${S.config.photoPts} pts)`;
+    $('#photo-status').textContent = ph.show ? ph.msg || 'Visage du chat visible · la photo révèle ta position' : '';
     const btn = $('#btn-tagged');
     btn.classList.toggle('hidden', inHead);
     const pending = S.pendingTag && S.pendingTag.roundId === g.roundId;
@@ -915,6 +1228,17 @@ function renderGame(now) {
   const pos = vis.pos;
   setMarker(gameMap, gameLayers.mouse, pos);
   setMarker(gameMap, gameLayers.acc, pos);
+  const z = vis.mode === 'shrink' ? vis.zone : null;
+  setMarker(gameMap, gameLayers.hint, z && z.center);
+  if (z && z.center) {
+    gameLayers.hint.setRadius(z.r);
+    if (fittedRound !== g.roundId) {
+      fittedRound = g.roundId;
+      gameMap.fitBounds(gameLayers.hint.getBounds().pad(0.2), { maxZoom: 17 });
+    }
+  }
+  const pin = photoPins.filter((p) => p.roundId === g.roundId).pop();
+  setMarker(gameMap, gameLayers.photo, pin && pin.pos);
   if (pos) {
     gameLayers.acc.setRadius(pos.acc || 1);
     const stale = vis.mode === 'interval' || now - pos.at > 15000;
@@ -928,17 +1252,36 @@ function renderGame(now) {
   }
   const info = [];
   if (vis.mode === 'hidden') info.push('Position de la souris cachée.');
-  else if (!pos) info.push('En attente de la position de la souris…');
+  else if (vis.mode === 'shrink') {
+    if (!z.center) info.push('En attente de la position de la souris…');
+    else info.push(`La souris est dans le cercle de ${fmtDist(z.r)}`);
+    info.push(`Nouvelle zone dans ${fmtCountdown(vis.next - now)}`);
+  } else if (!pos) info.push('En attente de la position de la souris…');
   else {
     info.push(`Position d'il y a ${fmt(now - pos.at)}`);
     if (myPos) info.push(`Distance : ${fmtDist(haversine(myPos, pos))}`);
   }
   if (vis.mode === 'interval') info.push(`Prochaine révélation dans ${fmtCountdown(vis.next - now)}`);
+  if (pin) info.push(`📸 = lieu de la dernière photo (il y a ${fmt(now - pin.pos.at)})`);
   $('#hunter-info').textContent = info.join(' · ');
 }
 
 $('#btn-tagged').addEventListener('click', async () => {
   if (await confirmDialog('Le chat t\'a vraiment touché ? Les rôles vont s\'inverser.')) declareTagged();
+});
+$('#btn-photo').addEventListener('click', () => {
+  $('#photo-input').value = '';
+  $('#photo-input').click();
+});
+$('#photo-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // pour pouvoir reprendre une photo identique
+  if (!file || !S || !S.game) return;
+  try {
+    submitPhoto(await compressPhoto(file));
+  } catch {
+    toast('Impossible de lire la photo');
+  }
 });
 $('#btn-mouse-map').addEventListener('click', () => {
   const wrap = $('#mouse-map-wrap');
@@ -956,15 +1299,17 @@ $('#btn-mouse-map').addEventListener('click', () => {
 /* Fin */
 function renderEnd() {
   const g = S.game;
-  const scores = currentScores(g.endAt);
+  const pts = currentPoints(g.endAt);
   const names = { [me()]: S.myName, [other()]: S.otherName };
-  const diff = scores[me()] - scores[other()];
-  const draw = Math.abs(diff) < 1000;
+  const diff = pts[me()].total - pts[other()].total;
+  const draw = diff === 0;
   $('#end-emoji').textContent = draw ? '🤝' : diff > 0 ? '🏆' : '😿';
   $('#end-title').textContent = draw ? 'Égalité !' : diff > 0 ? 'Tu as gagné !' : `${S.otherName} a gagné`;
   const winner = draw ? null : diff > 0 ? me() : other();
   $('#end-scores').innerHTML = [me(), other()].map((k) =>
-    `<div class="${k === winner ? 'win' : ''}"><span>${esc(names[k])}</span><b>${fmt(scores[k])}</b></div>`).join('');
+    `<div class="${k === winner ? 'win' : ''}"><span>${esc(names[k])}` +
+    `<small>${fmt(pts[k].time)} en souris → ${pts[k].timePts} pts · ${pts[k].photos} photo${pts[k].photos > 1 ? 's' : ''} → ${pts[k].photoPts} pts</small>` +
+    `</span><b>${pts[k].total} pts</b></div>`).join('');
   const rounds = g.rounds.concat([{ mouse: g.mouse, start: g.roundStart, end: g.endAt }]);
   $('#end-rounds').innerHTML = rounds.map((r) =>
     `<li>🐭 ${esc(names[r.mouse])} — ${fmt(r.end - r.start)}${r.end < g.endAt ? ' (touché)' : ''}</li>`).join('');
@@ -996,8 +1341,15 @@ function tick() {
         if (fittedRound === null) gameMap.fitBounds(zoneBounds(S.config.zone), { padding: [20, 20] });
       }, 50);
     }
-    if (screen === 'end') { renderEnd(); keepAwake(false); alertUser('phase'); }
+    if (screen === 'end') {
+      renderEnd();
+      keepAwake(false);
+      alertUser('phase');
+      if ($('#photo-dialog').open) { photoShown = null; $('#photo-dialog').close('done'); }
+    }
   }
+  if (S.role === 'host' && g && screen === 'game') hostAutoAcceptPhotos(now);
+  if (screen === 'end' && Math.random() < 0.05) renderEnd(); // un dernier état peut arriver juste après la fin
   if (screen === 'draw') renderDraw(now);
   if (screen === 'game') renderGame(now);
   if (screen === 'lobby' && Math.random() < 0.1) renderLobby();

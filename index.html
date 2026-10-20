@@ -79,6 +79,7 @@
       <label>Position de la souris pendant la chasse
         <select name="reveal">
           <option value="interval" selected>Révélée régulièrement</option>
+          <option value="shrink">Zone qui se rétrécit</option>
           <option value="live">En direct</option>
           <option value="hidden">Cachée</option>
         </select>
@@ -86,6 +87,29 @@
       <label id="reveal-every-wrap">Révélation toutes les (minutes)
         <input name="revealEvery" type="number" min="0.5" max="60" step="0.5" value="2">
       </label>
+      <div id="shrink-wrap" class="form-group">
+        <small class="muted">Le chat voit un cercle qui contient la souris (sans être centré dessus), mis à jour toutes les 20 s. Il rétrécit avec le temps et repart du rayon de départ quand la souris est touchée.</small>
+        <label>Rayon de départ (mètres)
+          <input name="shrinkStart" type="number" min="50" max="5000" step="10" value="500">
+        </label>
+        <label>Rayon final (mètres)
+          <input name="shrinkEnd" type="number" min="10" max="2000" step="5" value="30">
+        </label>
+        <label>Durée du rétrécissement (minutes)
+          <input name="shrinkDur" type="number" min="0.5" max="120" step="0.5" value="10">
+        </label>
+      </div>
+      <fieldset class="group">
+        <legend>Points</legend>
+        <small id="rate-hint" class="muted"></small>
+        <label>Points par photo du chat
+          <input name="photoPts" type="number" min="0" max="1000" step="10" value="100">
+          <small>La souris photographie le visage du chat ; le chat valide la photo. Une photo révèle la position de la souris. 0 = désactivé.</small>
+        </label>
+        <label>Délai entre deux photos (minutes)
+          <input name="photoCooldown" type="number" min="0.5" max="60" step="0.5" value="3">
+        </label>
+      </fieldset>
       <details>
         <summary>Avancé</summary>
         <label>Serveur de connexion (MQTT WebSocket)
@@ -153,8 +177,8 @@
       <div class="role" id="game-role"></div>
       <div class="clocks">
         <div><small>Fin de partie</small><b id="game-left">--:--</b></div>
-        <div><small>Moi en souris</small><b id="score-me">00:00</b></div>
-        <div><small id="score-other-label">Adversaire</small><b id="score-other">00:00</b></div>
+        <div><small>Mes points</small><b id="score-me">0</b></div>
+        <div><small id="score-other-label">Adversaire</small><b id="score-other">0</b></div>
       </div>
       <div id="net-dot" class="net-dot" title="Connexion"></div>
       <button id="game-quit" class="game-quit" aria-label="Abandonner">✕</button>
@@ -176,6 +200,9 @@
       <div id="mouse-timer" class="mouse-timer">--:--</div>
       <div id="mouse-sub" class="muted center"></div>
       <button id="btn-tagged" class="btn btn-tag hidden">Je suis touché !</button>
+      <button id="btn-photo" class="btn btn-photo hidden">📸 Photo du chat</button>
+      <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
+      <div id="photo-status" class="muted center"></div>
       <button id="btn-mouse-map" class="btn btn-ghost btn-small">Voir la zone</button>
       <div id="mouse-map-wrap" class="mouse-map hidden"><div id="mouse-map" class="map"></div></div>
     </div>
@@ -193,6 +220,17 @@
   </section>
 
   <div id="toast" class="toast"></div>
+  <dialog id="photo-dialog">
+    <form method="dialog">
+      <p>📸 La souris t'a pris en photo !<br><small class="muted">Ton visage est-il bien visible ?</small></p>
+      <img id="photo-img" alt="Photo prise par la souris">
+      <p id="photo-auto" class="muted small"></p>
+      <div class="row gap">
+        <button value="no" class="btn btn-secondary grow">Refuser</button>
+        <button value="yes" class="btn btn-main grow">Valider</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="confirm">
     <form method="dialog">
       <p id="confirm-text"></p>
